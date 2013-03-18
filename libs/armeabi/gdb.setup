@@ -1,0 +1,2 @@
+set solib-search-path F:/code/android/colortransferandroid/obj/local/armeabi
+directory C:/android/ndk/platforms/android-14/arch-arm/usr/include F:/code/android/colortransferandroid/jni C:/android/ndk/sources/cxx-stl/stlport/stlport C:/android/ndk/sources/cxx-stl//gabi++/include

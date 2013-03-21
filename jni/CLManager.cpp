@@ -611,7 +611,7 @@ OpenCLMemoryObjectWrapper* CLManager::getCLMemoryObject(string name)
 	return NULL;
 }
 
-OpenCLMemoryObjectWrapper* CLManager::loadImage(OpenCLContextWrapper* contextWrapper, char *fileName)
+OpenCLMemoryObjectWrapper* CLManager::loadImageFromFile(OpenCLContextWrapper* contextWrapper, char *fileName)
 {
 
 	LOGI("CLManager::loadImage(%s)", fileName);
@@ -645,7 +645,6 @@ OpenCLMemoryObjectWrapper* CLManager::loadImage(OpenCLContextWrapper* contextWra
     clImageFormat.image_channel_order = CL_RGBA;
     clImageFormat.image_channel_data_type = CL_UNORM_INT8;
 
-
     cl_int errNum;   
 	imageWrapper->memoryObject = clCreateImage2D(contextWrapper->context,
                             CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
@@ -670,6 +669,44 @@ OpenCLMemoryObjectWrapper* CLManager::loadImage(OpenCLContextWrapper* contextWra
 	LOGI("Loaded image %s", fileName);
 	CLMemoryObjects.push_back(imageWrapper);
     return imageWrapper;
+}
+
+OpenCLMemoryObjectWrapper* CLManager::loadImageFromBuffer(OpenCLContextWrapper* contextWrapper, char* name, char *buffer)
+{
+	LOGI("CLManager::loadImage(%s)", name);
+
+	OpenCLMemoryObjectWrapper* imageWrapper = new OpenCLMemoryObjectWrapper();
+
+	// Create OpenCL image
+	cl_image_format clImageFormat;
+	clImageFormat.image_channel_order = CL_RGBA;
+	clImageFormat.image_channel_data_type = CL_UNORM_INT8;
+
+	cl_int errNum;
+	imageWrapper->memoryObject = clCreateImage2D(contextWrapper->context,
+							CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+							&clImageFormat,
+							imageWrapper->width,
+							imageWrapper->height,
+							0,
+							buffer,
+							&errNum);
+
+	if (errNum != CL_SUCCESS)
+	{
+		LOGI("Error creating CL image object");
+		return 0;
+	}
+
+	imageWrapper->name = string(name);
+	imageWrapper->type = string("image");
+	imageWrapper->imageFormat.image_channel_order = CL_RGBA;
+	imageWrapper->imageFormat.image_channel_data_type = CL_UNORM_INT8;
+
+	LOGI("Loaded image %s", name);
+	CLMemoryObjects.push_back(imageWrapper);
+	return imageWrapper;
+
 }
 
 OpenCLMemoryObjectWrapper* CLManager::createBlankCLImage(OpenCLContextWrapper* contextWrapper, cl_mem_flags const flags, cl_uint const format, cl_uint const dataType, cl_uint const width, cl_uint const height, char* const name)
@@ -739,8 +776,6 @@ bool CLManager::saveImage(OpenCLMemoryObjectWrapper* imageWrapper,char* filename
 {
 	
 	//save a 128bpp image to a 32bpp file image (typically .png)
-
-
 	cl_int errNum; 
 	
 	float* fbuffer=NULL;

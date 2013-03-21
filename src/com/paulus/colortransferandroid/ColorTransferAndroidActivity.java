@@ -42,6 +42,9 @@ public class ColorTransferAndroidActivity extends Activity
     //native methods
     public native String[] initCL();
     public native boolean buildKernels();
+    public native boolean loadSourceImage();
+    public native boolean loadTargetImage();
+    public native boolean performColorTransfer();
     
     static
     {
@@ -69,8 +72,11 @@ public class ColorTransferAndroidActivity extends Activity
                  android.R.layout.simple_list_item_1, stringArray);     
 		listView1.setAdapter(adapter);
 		
+		//OpenCL work
 		buildKernels();
-		
+		loadSourceImage();
+		loadTargetImage();
+		performColorTransfer();
 	}	
 
 	@Override

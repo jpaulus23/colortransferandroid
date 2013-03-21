@@ -51,7 +51,9 @@ class CLManager {
 														void* hostPtr,
 														char* name);
 
-		OpenCLMemoryObjectWrapper* loadImage(OpenCLContextWrapper* contextWrapper, char *fileName);
+		OpenCLMemoryObjectWrapper* loadImageFromFile(OpenCLContextWrapper* contextWrapper, char *fileName);
+		OpenCLMemoryObjectWrapper* loadImageFromBuffer(OpenCLContextWrapper* contextWrapper, char* name, char *buffer);
+
 		bool                       saveImage(OpenCLMemoryObjectWrapper* imageWrapper,char* filename, OpenCLCommandQueueWrapper* cqWrapper);
 
 		OpenCLMemoryObjectWrapper* createBlankCLImage(OpenCLContextWrapper* contextWrapper, 
@@ -63,10 +65,6 @@ class CLManager {
 													char* const           name);
 
 		OpenCLSamplerWrapper* createCLSampler(OpenCLContextWrapper* contextWrapper, cl_bool normalized, cl_addressing_mode addressingMode, cl_filter_mode filterMode, char* name);
-											  
-
-		
-
 		
 		void			  initCL();
 		void			  printDebugInfo();

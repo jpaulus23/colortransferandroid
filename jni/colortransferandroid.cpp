@@ -154,7 +154,45 @@ const char* clProgram =
 extern "C" {
 #endif
 
+/* globals */
 CLManager clManager;
+
+OpenCLContextWrapper* gpuContext=NULL;
+
+OpenCLCommandQueueWrapper* gpuCommandQueue = NULL;
+
+OpenCLProgramWrapper* colorTransferProgram = NULL;
+
+OpenCLKernelWrapper* rgbToLABKernel = NULL;
+
+OpenCLKernelWrapper* colorTransferKernel = NULL;
+
+OpenCLMemoryObjectWrapper* colorTransferDataBuffer = NULL;
+
+OpenCLMemoryObjectWrapper* inputImageTarget = NULL; //eg picasso painting
+
+OpenCLMemoryObjectWrapper* inputImageSource = NULL; //eg camera image
+
+OpenCLMemoryObjectWrapper* outputImage_RGB32 = NULL;
+
+OpenCLMemoryObjectWrapper* inputImageSource_LAB32 = NULL;
+
+OpenCLMemoryObjectWrapper* inputImageTarget_LAB32 = NULL;
+
+OpenCLSamplerWrapper* samplerWrapper = NULL;
+
+float* fbufferTarget = NULL;
+
+float* fbufferSource = NULL;
+
+size_t origin[3] = {0,0,0};
+size_t region[3] = {1024,1024,1};
+size_t globalWorkSize[2] = {1024,1024}; //(1024x1024)
+size_t localWorkSize[2] = {1,1};
+
+cl_int clErrorCode=-1;
+
+float sourceMeanL,sourceMeanA,sourceMeanB,targetMeanL,targetMeanA,targetMeanB;
 
 jobjectArray
 Java_com_paulus_colortransferandroid_ColorTransferAndroidActivity_initCL( JNIEnv* env,
@@ -183,25 +221,15 @@ jboolean
 Java_com_paulus_colortransferandroid_ColorTransferAndroidActivity_buildKernels( JNIEnv* env,
                                                   jobject thiz )
 {
-
-
 	FreeImage_Initialise(); //very important!
 
-	OpenCLContextWrapper* gpuContext=NULL;
-
 	gpuContext = clManager.getCLContext("ARM", "gpu");
-
-	OpenCLCommandQueueWrapper* gpuCommandQueue = NULL;
-
-	cl_int errorCode=-1;
-
-	OpenCLMemoryObjectWrapper* colorTransferDataBuffer;
 
 	if(gpuContext != NULL)
 	{
 		LOGI("Successfully got Mali GPU opencl context");
 		//create program
-		OpenCLProgramWrapper* colorTransferProgram = clManager.createCLProgramFromString(gpuContext,gpuContext->childrenDevices[0],clProgram,"colortransfer_program");
+		colorTransferProgram = clManager.createCLProgramFromString(gpuContext,gpuContext->childrenDevices[0],clProgram,"colortransfer_program");
 		if(!colorTransferProgram)
 		{
 			LOGI("Error creating program, aborting.");
@@ -209,13 +237,13 @@ Java_com_paulus_colortransferandroid_ColorTransferAndroidActivity_buildKernels( 
 		}
 
 		//create kernels
-		OpenCLKernelWrapper* rgbToLABKernel = clManager.createCLKernel(colorTransferProgram, "rgbToLAB");
+		rgbToLABKernel = clManager.createCLKernel(colorTransferProgram, "rgbToLAB");
 		if(!rgbToLABKernel)
 		{
 			LOGI("Error creating kernel, aborting.");
 			return 0;
 		}
-		OpenCLKernelWrapper* colorTransferKernel = clManager.createCLKernel(colorTransferProgram, "colorTransfer");
+		colorTransferKernel = clManager.createCLKernel(colorTransferProgram, "colorTransfer");
 		if(!colorTransferKernel)
 		{
 			LOGI("Error creating kernel, aborting.");
@@ -223,228 +251,254 @@ Java_com_paulus_colortransferandroid_ColorTransferAndroidActivity_buildKernels( 
 		}
 
 		//samplers
-		OpenCLSamplerWrapper* samplerWrapper = clManager.createCLSampler(gpuContext,CL_FALSE,CL_ADDRESS_CLAMP_TO_EDGE,CL_FILTER_NEAREST,"sampler1024clampnearest");
-
-		OpenCLMemoryObjectWrapper* inputImageSource = clManager.loadImage(gpuContext, "/mnt/sdcard/inputsource.png");
-
-		if (!inputImageSource || (inputImageSource->memoryObject == 0))
-		{
-			LOGI("Error loading: %s","/mnt/sdcard/inputsource.png");
-			//Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-			return 0;
-		}
-
-		OpenCLMemoryObjectWrapper* inputImageTarget = clManager.loadImage(gpuContext, "/mnt/sdcard/inputtarget.png");
-
-		if (!inputImageTarget || (inputImageTarget->memoryObject == 0))
-		{
-			LOGI("Error loading: %s","/mnt/sdcard/inputtarget.png");
-			//Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
-			return 0;
-		}
-
-		//intermediate buffers needed to store the LAB colorspace image with 32bits per channel
-		OpenCLMemoryObjectWrapper* inputImageSource_LAB32 = clManager.createBlankCLImage(gpuContext,CL_MEM_READ_WRITE,CL_RGBA,CL_FLOAT,1024,1024,"inputImageSource_LAB32");
-		OpenCLMemoryObjectWrapper* inputImageTarget_LAB32 = clManager.createBlankCLImage(gpuContext,CL_MEM_READ_WRITE,CL_RGBA,CL_FLOAT,1024,1024,"inputImageTarget_LAB32");
+		samplerWrapper = clManager.createCLSampler(gpuContext,CL_FALSE,CL_ADDRESS_CLAMP_TO_EDGE,CL_FILTER_NEAREST,"sampler1024clampnearest");
 
 		//store the final image in the r32g32b32a32 format (will be downsampled when saving to disk)
-		OpenCLMemoryObjectWrapper* outputImage_RGB32 = clManager.createBlankCLImage(gpuContext,CL_MEM_READ_WRITE,CL_RGBA,CL_FLOAT,1024,1024,"outputImage_RGB32");
-
-
-		//first process the source image
-		errorCode  = clSetKernelArg(rgbToLABKernel->kernel,0,sizeof(cl_mem),&inputImageSource->memoryObject);
-		errorCode |= clSetKernelArg(rgbToLABKernel->kernel,1,sizeof(cl_mem),&inputImageSource_LAB32->memoryObject);
-		errorCode |= clSetKernelArg(rgbToLABKernel->kernel,2,sizeof(cl_sampler),&samplerWrapper->sampler);
-
-		if(errorCode != CL_SUCCESS) {
-			LOGI("Error setting kernel arguments, aborting.");
-			return 1;
-		}
+		outputImage_RGB32 = clManager.createBlankCLImage(gpuContext,CL_MEM_READ_WRITE,CL_RGBA,CL_FLOAT,1024,1024,"outputImage_RGB32");
 
 		//grab the command queue so we can deploy the kernel
 		gpuCommandQueue = clManager.getCLCommandQueue("Mali-T604");
-		if(!gpuCommandQueue) {
+		if(!gpuCommandQueue)
+		{
 			LOGI("Could not get gpuCommandQueue");
 			getchar();
 			return 1;
 		}
 
-		//dimensions of CL workload
-		size_t globalWorkSize[2] = {1024,1024}; //(1024x1024)
-		size_t localWorkSize[2] = {1,1};
+	}
+	return true;
+}
 
-		//rock and roll is here to stay
-		CL_ASSERT(clEnqueueNDRangeKernel(gpuCommandQueue->commandQueue,rgbToLABKernel->kernel,2,NULL,globalWorkSize,localWorkSize,0,NULL,NULL));
+jboolean
+Java_com_paulus_colortransferandroid_ColorTransferAndroidActivity_loadSourceImage( JNIEnv* env,
+                                                  jobject thiz )
+{
+	//SOURCE
+	inputImageSource = clManager.loadImageFromFile(gpuContext, "/mnt/sdcard/inputsource.png");
 
-		//now do the same RGB->LAB conversion for the target image
-		errorCode  = clSetKernelArg(rgbToLABKernel->kernel,0,sizeof(cl_mem),&inputImageTarget->memoryObject);
-		errorCode |= clSetKernelArg(rgbToLABKernel->kernel,1,sizeof(cl_mem),&inputImageTarget_LAB32->memoryObject);
-		errorCode |= clSetKernelArg(rgbToLABKernel->kernel,2,sizeof(cl_sampler),&samplerWrapper->sampler);
+	if (!inputImageSource || (inputImageSource->memoryObject == 0))
+	{
+		LOGI("Error loading: %s","/mnt/sdcard/inputsource.png");
+		//Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
+		return 0;
+	}
 
-		if(errorCode != CL_SUCCESS) {
-			LOGI("Error setting kernel arguments, aborting.");
-			return 1;
-		}
+	//intermediate buffers needed to store the LAB colorspace image with 32bits per channel
+	inputImageSource_LAB32 = clManager.createBlankCLImage(gpuContext,CL_MEM_READ_WRITE,CL_RGBA,CL_FLOAT,1024,1024,"inputImageSource_LAB32");
 
-		CL_ASSERT(clEnqueueNDRangeKernel(gpuCommandQueue->commandQueue,rgbToLABKernel->kernel,2,NULL,globalWorkSize,localWorkSize,0,NULL,NULL));
+	clErrorCode  = clSetKernelArg(rgbToLABKernel->kernel,0,sizeof(cl_mem),&inputImageSource->memoryObject);
+	clErrorCode |= clSetKernelArg(rgbToLABKernel->kernel,1,sizeof(cl_mem),&inputImageSource_LAB32->memoryObject);
+	clErrorCode |= clSetKernelArg(rgbToLABKernel->kernel,2,sizeof(cl_sampler),&samplerWrapper->sampler);
 
-		float* fbufferSource = new float[inputImageSource_LAB32->width * inputImageSource_LAB32->width * 4];
-		float* fbufferTarget = new float[inputImageSource_LAB32->width * inputImageSource_LAB32->width * 4];
-
-		size_t origin[3] = {0,0,0};
-		size_t region[3] = {inputImageSource_LAB32->width,inputImageSource_LAB32->height,1};
-
-		errorCode = clEnqueueReadImage(gpuCommandQueue->commandQueue,inputImageSource_LAB32->memoryObject,CL_TRUE,origin,region,0,0,fbufferSource,0,NULL,NULL);
-
-		if(errorCode != CL_SUCCESS) {
-			LOGI("Error doing clEnqueueReadImage(inputImageSource_LAB32) in main()");
-		}
-
-		errorCode = clEnqueueReadImage(gpuCommandQueue->commandQueue,inputImageTarget_LAB32->memoryObject,CL_TRUE,origin,region,0,0,fbufferTarget,0,NULL,NULL);
-
-		if(errorCode != CL_SUCCESS) {
-			LOGI("Error doing clEnqueueReadImage(inputImageTarget_LAB32) in main()");
-		}
-
-		float sourceMeanL,sourceMeanA,sourceMeanB,targetMeanL,targetMeanA,targetMeanB;
-		sourceMeanL=sourceMeanA=sourceMeanB=targetMeanL=targetMeanA=targetMeanB=0.0;
-
-		//compute means
-		for(unsigned int i=0; i < (inputImageSource_LAB32->width * inputImageSource_LAB32->height*4); i+=4) {
-			sourceMeanL += fbufferSource[i];
-			sourceMeanA += fbufferSource[i+1];
-			sourceMeanB += fbufferSource[i+2];
-		}
-
-		sourceMeanL /= (inputImageSource_LAB32->width * inputImageSource_LAB32->height );
-		sourceMeanA /= (inputImageSource_LAB32->width * inputImageSource_LAB32->height );
-		sourceMeanB /= (inputImageSource_LAB32->width * inputImageSource_LAB32->height );
-
-		LOGI("sourceMeanL: %f",sourceMeanL);
-		LOGI("sourceMeanA: %f",sourceMeanA);
-		LOGI("sourceMeanB: %f",sourceMeanB);
-
-		float totalSquaredSourceL=0.0f;
-		float totalSquaredSourceA=0.0f;
-		float totalSquaredSourceB=0.0f;
-
-		float stddevSourceL=0.0f;
-		float stddevSourceA=0.0f;
-		float stddevSourceB=0.0f;
-
-		//compute standard deviation
-		for(unsigned int i=0; i < (inputImageSource_LAB32->width * inputImageSource_LAB32->height*4); i+=4) {
-			//subtract means
-			fbufferSource[i] -= sourceMeanL;
-			fbufferSource[i+1] -= sourceMeanA;
-			fbufferSource[i+2]-= sourceMeanB;
-
-			//compute squares
-			fbufferSource[i] *= fbufferSource[i];
-			fbufferSource[i+1] *= fbufferSource[i+1];
-			fbufferSource[i+2] *= fbufferSource[i+2];
-
-			//add squares
-			totalSquaredSourceL += fbufferSource[i];
-			totalSquaredSourceA += fbufferSource[i+1];
-			totalSquaredSourceB += fbufferSource[i+2];
-		}
-
-		stddevSourceL = sqrt(totalSquaredSourceL/((inputImageSource_LAB32->width * inputImageSource_LAB32->height)-1));
-		stddevSourceA = sqrt(totalSquaredSourceA/((inputImageSource_LAB32->width * inputImageSource_LAB32->height)-1));
-		stddevSourceB = sqrt(totalSquaredSourceB/((inputImageSource_LAB32->width * inputImageSource_LAB32->height)-1));
-
-		LOGI("stddevSourceL: %f " , stddevSourceL );
-		LOGI("stddevSourceA: %f" , stddevSourceA );
-		LOGI("stddevSourceB: %f" , stddevSourceB );
-
-		//now do the same for the target
-
-		//compute means
-		for(unsigned int i=0; i < (inputImageTarget_LAB32->width * inputImageTarget_LAB32->height*4); i+=4) {
-			targetMeanL += fbufferTarget[i];
-			targetMeanA += fbufferTarget[i+1];
-			targetMeanB += fbufferTarget[i+2];
-		}
-
-		targetMeanL /= (inputImageTarget_LAB32->width * inputImageTarget_LAB32->height );
-		targetMeanA /= (inputImageTarget_LAB32->width * inputImageTarget_LAB32->height );
-		targetMeanB /= (inputImageTarget_LAB32->width * inputImageTarget_LAB32->height );
-
-		LOGI("targetMeanL: %f" , targetMeanL );
-		LOGI("targetMeanA: %f" , targetMeanA );
-		LOGI("targetMeanB: %f" , targetMeanB );
-
-		float totalSquaredTargetL=0.0f;
-		float totalSquaredTargetA=0.0f;
-		float totalSquaredTargetB=0.0f;
-
-		float stddevTargetL=0.0f;
-		float stddevTargetA=0.0f;
-		float stddevTargetB=0.0f;
-
-		//compute standard deviation
-		for(unsigned int i=0; i < (inputImageTarget_LAB32->width * inputImageTarget_LAB32->height*4); i+=4) {
-			//subtract means
-			fbufferTarget[i] -= sourceMeanL;
-			fbufferTarget[i+1] -= sourceMeanA;
-			fbufferTarget[i+2]-= sourceMeanB;
-
-			//compute squares
-			fbufferTarget[i] *= fbufferTarget[i];
-			fbufferTarget[i+1] *= fbufferTarget[i+1];
-			fbufferTarget[i+2] *= fbufferTarget[i+2];
-
-			//add squares
-			totalSquaredTargetL += fbufferTarget[i];
-			totalSquaredTargetA += fbufferTarget[i+1];
-			totalSquaredTargetB += fbufferTarget[i+2];
-		}
-
-		stddevTargetL = sqrt(totalSquaredTargetL/((inputImageTarget_LAB32->width * inputImageTarget_LAB32->height)-1));
-		stddevTargetA = sqrt(totalSquaredTargetA/((inputImageTarget_LAB32->width * inputImageTarget_LAB32->height)-1));
-		stddevTargetB = sqrt(totalSquaredTargetB/((inputImageTarget_LAB32->width * inputImageTarget_LAB32->height)-1));
-
-		LOGI("stddevTargetL: %f", stddevTargetL );
-		LOGI("stddevTargetA: %f" , stddevTargetA );
-		LOGI("stddevTargetB: %f", stddevTargetB );
-
-		//ok, all required data has been calculated, lets do the color transfer
-
-		float data[] = {stddevSourceL,stddevSourceA,stddevSourceB,stddevTargetL,stddevTargetA,stddevTargetB,sourceMeanL,sourceMeanA,sourceMeanB,targetMeanL,targetMeanA,targetMeanB};
-
-		colorTransferDataBuffer =  clManager.createCLMemoryObject(gpuContext,
-												CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-												sizeof(float)*12,
-												data,
-												"colorTransferDataBuffer");
-
-		errorCode  = clSetKernelArg(colorTransferKernel->kernel,0,sizeof(cl_mem),&inputImageSource_LAB32->memoryObject);
-		errorCode |= clSetKernelArg(colorTransferKernel->kernel,1,sizeof(cl_mem),&outputImage_RGB32->memoryObject);
-		errorCode |= clSetKernelArg(colorTransferKernel->kernel,2,sizeof(cl_sampler),&samplerWrapper->sampler);
-		errorCode |= clSetKernelArg(colorTransferKernel->kernel,3,sizeof(cl_mem) ,&colorTransferDataBuffer->memoryObject);
-
-		if(errorCode != CL_SUCCESS) {
-			LOGI("Error setting kernel arguments, aborting.");
-			getchar();
-			return 1;
-		}
-
-		CL_ASSERT(clEnqueueNDRangeKernel(gpuCommandQueue->commandQueue,colorTransferKernel->kernel,2,NULL,globalWorkSize,localWorkSize,0,NULL,NULL));
-
-		//L' =  (stddevTargetL/stddevTargetL) * (L-meanL)
-
-		//clManager.saveImage(inputImageSource_LAB32,"outputSourceLAB.png", gpuCommandQueue);
-		//clManager.saveImage(inputImageTarget_LAB32,"outputTargetLAB.png", gpuCommandQueue);
-		clManager.saveImage(outputImage_RGB32,"/sdcard/output.png", gpuCommandQueue);
-
+	if(clErrorCode != CL_SUCCESS)
+	{
+		LOGI("Error setting kernel arguments, aborting.");
 		return 1;
 	}
 
-	return 0;
+	//rock and roll is here to stay
+	CL_ASSERT(clEnqueueNDRangeKernel(gpuCommandQueue->commandQueue,rgbToLABKernel->kernel,2,NULL,globalWorkSize,localWorkSize,0,NULL,NULL));
+
+	fbufferSource = new float[inputImageSource_LAB32->width * inputImageSource_LAB32->width * 4];
+
+	size_t origin[3] = {0,0,0};
+
+	clErrorCode = clEnqueueReadImage(gpuCommandQueue->commandQueue,inputImageSource_LAB32->memoryObject,CL_TRUE,origin,region,0,0,fbufferSource,0,NULL,NULL);
+
+	if(clErrorCode != CL_SUCCESS)
+	{
+		LOGI("Error doing clEnqueueReadImage(inputImageSource_LAB32) in main()");
+	}
 }
 
+jboolean
+Java_com_paulus_colortransferandroid_ColorTransferAndroidActivity_performColorTransfer( JNIEnv* env,
+                                                  jobject thiz )
+{
+	sourceMeanL=sourceMeanA=sourceMeanB=targetMeanL=targetMeanA=targetMeanB=0.0;
 
+	//fbufferTarget = new float[inputImageTarget_LAB32->width * inputImageTarget_LAB32->width * 4];
+
+	//compute means
+	for(unsigned int i=0; i < (inputImageSource_LAB32->width * inputImageSource_LAB32->height*4); i+=4)
+	{
+		sourceMeanL += fbufferSource[i];
+		sourceMeanA += fbufferSource[i+1];
+		sourceMeanB += fbufferSource[i+2];
+	}
+
+	sourceMeanL /= (inputImageSource_LAB32->width * inputImageSource_LAB32->height );
+	sourceMeanA /= (inputImageSource_LAB32->width * inputImageSource_LAB32->height );
+	sourceMeanB /= (inputImageSource_LAB32->width * inputImageSource_LAB32->height );
+
+	LOGI("sourceMeanL: %f",sourceMeanL);
+	LOGI("sourceMeanA: %f",sourceMeanA);
+	LOGI("sourceMeanB: %f",sourceMeanB);
+
+	float totalSquaredSourceL=0.0f;
+	float totalSquaredSourceA=0.0f;
+	float totalSquaredSourceB=0.0f;
+
+	float stddevSourceL=0.0f;
+	float stddevSourceA=0.0f;
+	float stddevSourceB=0.0f;
+
+	//compute standard deviation
+	for(unsigned int i=0; i < (inputImageSource_LAB32->width * inputImageSource_LAB32->height*4); i+=4)
+	{
+		//subtract means
+		fbufferSource[i] -= sourceMeanL;
+		fbufferSource[i+1] -= sourceMeanA;
+		fbufferSource[i+2]-= sourceMeanB;
+
+		//compute squares
+		fbufferSource[i] *= fbufferSource[i];
+		fbufferSource[i+1] *= fbufferSource[i+1];
+		fbufferSource[i+2] *= fbufferSource[i+2];
+
+		//add squares
+		totalSquaredSourceL += fbufferSource[i];
+		totalSquaredSourceA += fbufferSource[i+1];
+		totalSquaredSourceB += fbufferSource[i+2];
+	}
+
+	stddevSourceL = sqrt(totalSquaredSourceL/((inputImageSource_LAB32->width * inputImageSource_LAB32->height)-1));
+	stddevSourceA = sqrt(totalSquaredSourceA/((inputImageSource_LAB32->width * inputImageSource_LAB32->height)-1));
+	stddevSourceB = sqrt(totalSquaredSourceB/((inputImageSource_LAB32->width * inputImageSource_LAB32->height)-1));
+
+	LOGI("stddevSourceL: %f " , stddevSourceL );
+	LOGI("stddevSourceA: %f" , stddevSourceA );
+	LOGI("stddevSourceB: %f" , stddevSourceB );
+
+	//now do the same for the target
+
+	//compute means
+	for(unsigned int i=0; i < (inputImageTarget_LAB32->width * inputImageTarget_LAB32->height*4); i+=4)
+	{
+		targetMeanL += fbufferTarget[i];
+		targetMeanA += fbufferTarget[i+1];
+		targetMeanB += fbufferTarget[i+2];
+	}
+
+	targetMeanL /= (inputImageTarget_LAB32->width * inputImageTarget_LAB32->height );
+	targetMeanA /= (inputImageTarget_LAB32->width * inputImageTarget_LAB32->height );
+	targetMeanB /= (inputImageTarget_LAB32->width * inputImageTarget_LAB32->height );
+
+	LOGI("targetMeanL: %f" , targetMeanL );
+	LOGI("targetMeanA: %f" , targetMeanA );
+	LOGI("targetMeanB: %f" , targetMeanB );
+
+	float totalSquaredTargetL=0.0f;
+	float totalSquaredTargetA=0.0f;
+	float totalSquaredTargetB=0.0f;
+
+	float stddevTargetL=0.0f;
+	float stddevTargetA=0.0f;
+	float stddevTargetB=0.0f;
+
+	//compute standard deviation
+	for(unsigned int i=0; i < (inputImageTarget_LAB32->width * inputImageTarget_LAB32->height*4); i+=4)
+	{
+		//subtract means
+		fbufferTarget[i] -= sourceMeanL;
+		fbufferTarget[i+1] -= sourceMeanA;
+		fbufferTarget[i+2]-= sourceMeanB;
+
+		//compute squares
+		fbufferTarget[i] *= fbufferTarget[i];
+		fbufferTarget[i+1] *= fbufferTarget[i+1];
+		fbufferTarget[i+2] *= fbufferTarget[i+2];
+
+		//add squares
+		totalSquaredTargetL += fbufferTarget[i];
+		totalSquaredTargetA += fbufferTarget[i+1];
+		totalSquaredTargetB += fbufferTarget[i+2];
+	}
+
+	stddevTargetL = sqrt(totalSquaredTargetL/((inputImageTarget_LAB32->width * inputImageTarget_LAB32->height)-1));
+	stddevTargetA = sqrt(totalSquaredTargetA/((inputImageTarget_LAB32->width * inputImageTarget_LAB32->height)-1));
+	stddevTargetB = sqrt(totalSquaredTargetB/((inputImageTarget_LAB32->width * inputImageTarget_LAB32->height)-1));
+
+	LOGI("stddevTargetL: %f", stddevTargetL );
+	LOGI("stddevTargetA: %f" , stddevTargetA );
+	LOGI("stddevTargetB: %f", stddevTargetB );
+
+	//ok, all required data has been calculated, lets do the color transfer
+
+	float data[] = {stddevSourceL,stddevSourceA,stddevSourceB,stddevTargetL,stddevTargetA,stddevTargetB,sourceMeanL,sourceMeanA,sourceMeanB,targetMeanL,targetMeanA,targetMeanB};
+
+	colorTransferDataBuffer =  clManager.createCLMemoryObject(gpuContext,
+											CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+											sizeof(float)*12,
+											data,
+											"colorTransferDataBuffer");
+
+	clErrorCode  = clSetKernelArg(colorTransferKernel->kernel,0,sizeof(cl_mem),&inputImageSource_LAB32->memoryObject);
+	clErrorCode |= clSetKernelArg(colorTransferKernel->kernel,1,sizeof(cl_mem),&outputImage_RGB32->memoryObject);
+	clErrorCode |= clSetKernelArg(colorTransferKernel->kernel,2,sizeof(cl_sampler),&samplerWrapper->sampler);
+	clErrorCode |= clSetKernelArg(colorTransferKernel->kernel,3,sizeof(cl_mem) ,&colorTransferDataBuffer->memoryObject);
+
+	if(clErrorCode != CL_SUCCESS)
+	{
+		LOGI("Error setting kernel arguments, aborting.");
+		getchar();
+		return 0;
+	}
+
+	CL_ASSERT(clEnqueueNDRangeKernel(gpuCommandQueue->commandQueue,colorTransferKernel->kernel,2,NULL,globalWorkSize,localWorkSize,0,NULL,NULL));
+
+	//L' =  (stddevTargetL/stddevTargetL) * (L-meanL)
+
+	//clManager.saveImage(inputImageSource_LAB32,"outputSourceLAB.png", gpuCommandQueue);
+	//clManager.saveImage(inputImageTarget_LAB32,"outputTargetLAB.png", gpuCommandQueue);
+	clManager.saveImage(outputImage_RGB32,"/sdcard/output.png", gpuCommandQueue);
+
+	return 1;
+}
+
+jboolean
+Java_com_paulus_colortransferandroid_ColorTransferAndroidActivity_loadTargetImage( JNIEnv* env,
+                                                  jobject thiz )
+{
+	//TARGET
+
+	inputImageTarget = clManager.loadImageFromFile(gpuContext, "/mnt/sdcard/inputtarget.png");
+
+	if (!inputImageTarget || (inputImageTarget->memoryObject == 0))
+	{
+		LOGI("Error loading: %s","/mnt/sdcard/inputtarget.png");
+		//Cleanup(context, commandQueue, program, kernel, imageObjects, sampler);
+		return 0;
+	}
+
+	//intermediate buffers needed to store the LAB colorspace image with 32bits per channel
+	inputImageTarget_LAB32 = clManager.createBlankCLImage(gpuContext,CL_MEM_READ_WRITE,CL_RGBA,CL_FLOAT,1024,1024,"inputImageTarget_LAB32");
+
+	//now do the same RGB->LAB conversion for the target image
+	clErrorCode  = clSetKernelArg(rgbToLABKernel->kernel,0,sizeof(cl_mem),&inputImageTarget->memoryObject);
+	clErrorCode |= clSetKernelArg(rgbToLABKernel->kernel,1,sizeof(cl_mem),&inputImageTarget_LAB32->memoryObject);
+	clErrorCode |= clSetKernelArg(rgbToLABKernel->kernel,2,sizeof(cl_sampler),&samplerWrapper->sampler);
+
+	if(clErrorCode != CL_SUCCESS)
+	{
+		LOGI("Error setting kernel arguments, aborting.");
+		return 0;
+	}
+
+	CL_ASSERT(clEnqueueNDRangeKernel(gpuCommandQueue->commandQueue,rgbToLABKernel->kernel,2,NULL,globalWorkSize,localWorkSize,0,NULL,NULL));
+
+	fbufferTarget = new float[inputImageTarget_LAB32->width * inputImageTarget_LAB32->width * 4];
+
+	clErrorCode = clEnqueueReadImage(gpuCommandQueue->commandQueue,inputImageTarget_LAB32->memoryObject,CL_TRUE,origin,region,0,0,fbufferTarget,0,NULL,NULL);
+
+	if(clErrorCode != CL_SUCCESS)
+	{
+		LOGI("Error doing clEnqueueReadImage(inputImageTarget_LAB32) in main()");
+	}
+
+	return 1;
+
+}
 
 
 #ifdef __cplusplus
